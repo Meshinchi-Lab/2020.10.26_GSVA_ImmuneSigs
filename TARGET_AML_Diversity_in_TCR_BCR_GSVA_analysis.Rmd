@@ -1,0 +1,581 @@
+---
+title: "TCR and BCR Diversity in AML"
+author: "Jenny Smith"
+date: "10/26/20"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+---
+
+# Set-up 
+
+```{r setup}
+library(knitr)
+knitr::opts_knit$set(root.dir = file.path(PROJHOME,"2020.10.26_GSVA_ImmuneSigs"))
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, 
+                      fig.align='center', fig.width = 10, fig.height = 10)
+
+
+options(stringsAsFactors = FALSE,bitmapType = 'cairo', device='x11')
+grDevices::X11.options(type='cairo')
+table = function (..., useNA = 'ifany') base::table(..., useNA = useNA)
+```
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+
+library(ggplot2)
+library(gridExtra)
+
+library(dplyr)
+library(tidyr)
+library(tibble)
+
+library(DeGSEA)
+getwd()
+```
+
+
+# ClinData
+
+```{r}
+merged <- read.csv(file.path(CDE,"Merged/TARGET_AML_0531_1031_merged_CDEs_9.18.20.csv"))
+
+merged <- merged %>% 
+  filter(!is.na(USI), USI != "Unknown") %>% 
+  filter(Eligibility_Comments != "remove")
+
+
+dim(merged)
+```
+
+
+# Define Samples
+
+```{r}
+sample_info <- read.csv(file.path(TARGET, "SequencingDataMatrix/TARGET_AML_Ribodepleted_Manifest_10.08.20.csv")) %>% 
+  filter(grepl("diagnostic|relapse|NBM|CD34_PB", Time_point),
+         grepl("AML|NBM|CD34_PB", Group)) %>%
+  mutate_at(vars(Tissue:Primary.CNV), ~ifelse(is.na(.), Group, .))
+
+head(sample_info)
+dim(sample_info)
+```
+
+
+# Raw Counts
+
+These will be replaced with STAR-aligner/HTSeq counts from GRCh38. 
+
+
+
+# Literature Search Methods
+
+We need to have a definitive list of the Genesets for use in the Immune Signature analysis. So we will begin with the curation and ssGSVA or ssGSEA.
+
+Also, need to determine what the literature states about methods for the ssGSEA or should we use another algorithm? 
+
+* Immune Lanscape of Cancer:
+https://www.sciencedirect.com/science/article/pii/S1074761318301213#sec4
+Gene sets from Bindea et al. (2013), Senbabaoglu et al. (2016), and the MSigDB C7 collection were scored using single-sample gene set enrichment (ssGSEA) analysis (Barbie et al., 2009), as implemented in the GSVA R package (Hänzelmann et al., 2013). All other signatures were scored using methods found in the associated citations
+Immune Signature Cluster Modeling in TCGA:Representative clusters were identified as follows: two independent analysts used weighted gene correlation network analysis (WGCNA) to produce clusters of signatures (Langfelder and Horvath, 2008). First, using gene set scores (ssGSEA) (Barbie et al., 2009) over all samples, Spearman correlations were computed between signatures creating a correlation matrix. Then, the correlation matrix was scaled by taking each element to a specified power and clustered using the WGCNA R package
+
+
+* Single-Cell RNA-Seq Reveals AML Hierarchies Relevant to Disease Progression and Immunity:
+https://www.sciencedirect.com/science/article/pii/S0092867419300947?via%3Dihub#sec4
+We calculated cell cycle-gene expression scores in single cell profiles by using a minimal gene signature of ten genes that are highly expressed in cycling cells (ASPM, CENPE, CENPF, DLGAP5, MKI67, NUSAP1, PCLAF, STMN1, TOP2A, TUBB). For each of these genes, we selected the 100 genes with the smallest difference in average expression level as a background gene set. The average expression of the background gene set was then subtracted from the respective signature gene, and the average of the resulting values of all signature genes was kept as the cell cycle-gene expression score. A similar strategy for scoring gene signatures from single-cell expression data has been described previously (Puram et al., 2017). 
+
+* Genomic Analysis of Immune Cell Infiltrates Across 11 Tumor Types
+https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5241901/
+For each signature, the mean expression of all genes in the signature was used as the signature score for a given tumor/patient.
+
+
+* Molecular and Genetic Properties of Tumors Associated with Local Immune Cytolytic Activity
+https://www.sciencedirect.com/science/article/pii/S0092867414016390?via%3Dihub#sec4
+Cytolytic activity (CYT) was calculated as the geometric mean of GZMA and PRF1 (as expressed in TPM, 0.01 offset). Marker genes for specific cell types were identified as those with expression at least 2-fold greater than observed in any other cell type (using Fantom5 and DMAP), and enrichment was calculated using ssGSEA (Barbie et al., 2009).
+
+
+* Pan-cancer Immunogenomic Analyses Reveal Genotype-Immunophenotype Relationships and Predictors of Response to Checkpoint Blockade
+Identification of TIL Subpopulations, Cancer-Germline Antigens, Neoantigens, Tumor Heterogeneity, and Clonality of Mutations
+Genomic and clinical data for 20 solid tumors were downloaded via the TCGA data portal (Supplemental Experimental Procedures). We used single sample gene set enrichment analysis (ssGSEA) (Barbie et al., 2009) to identify immune cell types that are over-represented in the tumor microenvironment (Supplemental Experimental Procedures).
+For each patient the cytolytic activity was calculated as the mean of the GZMA and PRF1 expression levels [log2 (TPM+1)] as previously defined (Rooney et al., 2015)
+
+# Define Gene Sets 
+
+## AML Immune Sigs
+
+> Cell. 2019 Mar 7;176(6):1265-1281.e24. doi: 10.1016/j.cell.2019.01.031. Epub 2019 Feb 28.
+*Single-Cell RNA-Seq Reveals AML Hierarchies Relevant to Disease Progression and Immunity*
+Peter van Galen 1, Volker Hovestadt 1, Marc H Wadsworth Ii 2, Travis K Hughes 2, Gabriel K Griffin 3, Sofia Battaglia 1, Julia A Verga 1, Jason Stephansky 4, Timothy J Pastika 4, Jennifer Lombardi Story 5, Geraldine S Pinkus 6, Olga Pozdnyakova 6, Ilene Galinsky 7, Richard M Stone 7, Timothy A Graubert 5, Alex K Shalek 2, Jon C Aster 8, Andrew A Lane 9, Bradley E Bernstein 10
+PMID: 30827681
+
+
+*Table S3*. Single-Cell Derived Gene Signatures, Related to Figures 5 and 6. Gene signatures for different normal and malignant cell types were generated by correlating prediction scores from the Random forest classifier to gene expression levels in single cells. For example, cells that highly express HLF tend to have high prediction scores for the HSC cell type, resulting in HLF being included as an HSC signature gene.
+
+```{r}
+malig.cell.types <- read.csv("Gene_Sets/vanGalen_2019_mmc3_fmt.csv")
+# head(malig.cell.types)
+
+
+malig.cell.types.gs <- lapply(select(malig.cell.types,HSC.Prog_Normal.derived..combined:Progenitor.like_Tumor.derived..per.cell.type,
+                                     Promono.like_Tumor.derived..per.cell.type:cDC.like_Tumor.derived..per.cell.type),
+                              function(x) x[x!=""])
+names(malig.cell.types.gs) <- paste0(names(malig.cell.types.gs), "_PMID_30827681")
+
+length(malig.cell.types.gs) #11
+``` 
+
+*Table S4*. Malignant Cell-Type-Specific Genes and Genes Specific to Malignant Monocytes, Related to Figures 6 and 7. Table lists genes that are more highly expressed in malignant cells compared to their normal counterparts. The left part of the first sheet shows average expression values in normal and malignant cells (log-transformed values). Genes associated with an expression difference ≥ 0.25 in the malignant cells are colored. The right part of the table shows correlation coefficients to random forest prediction scores for HSC/Prog, GMP, and Myeloid cell types across malignant cells. These values function as a measure for cell type specificity. Genes associated with a correlation coefficient ≥ 0.1 and an expression difference ≥ 0.25 are colored. These genes correspond to the genes colored in the upper right area in Figures 6A, S6A, and S6B. The second sheet lists genes that are more highly expressed in malignant monocyte-like cells compared to normal monocytes. Average expression values are provided (log-transformed values). Genes associated with an expression difference ≥ 0.5 in any tumor compared to the normal monocytes are colored. These genes correspond to the genes shown in the heatmap in Figure S7D.
+
+```{r}
+malig.mono <- read.csv("Gene_Sets/vanGalen_2019_mmc4_S4A_fmt.csv")
+# head(malig.mono)
+
+malig.mono.gs <- lapply(select(malig.mono,
+                               HSC.Prog_Corr_prediction_score_malignant_cells_Include,
+                               GMP_Corr_prediction_score_malignant_cells_Include,
+                               Myeloid_Corr_prediction_score_malignant_cells_Include),
+                        function(x) malig.mono$Gene[which(x==TRUE)])
+names(malig.mono.gs) <- gsub("_Include","_PMID_30827681",names(malig.mono.gs))
+length(malig.mono.gs)
+```
+
+
+```{r}
+gene_set_info <- tibble(Geneset_Name=names(c(malig.cell.types.gs,malig.mono.gs)), 
+                            Organism="Homo sapiens", #Check
+                            PMID="30827681",
+                            Description="Gene sets from supplemental materials in scRNAseq Manuscript VanGalen 2019",
+                            Notes="scRNAseq",
+                            Genes=sapply(c(malig.cell.types.gs,malig.mono.gs),function(x) paste(x,  collapse = ", ")))
+
+
+
+dim(gene_set_info)
+# View(gene_set_info)
+```
+
+```{r}
+input_gs <- c(malig.cell.types.gs, malig.mono.gs)
+
+length(input_gs) 
+```
+
+
+## Tim Shaw
+
+```{r}
+immune_signatures <- read.gmt("Gene_Sets/immune_signatures.gmt")
+length(immune_signatures) #194
+
+# head(immune_signatures)
+```
+
+```{r}
+immuneSigs.info <- tibble(Geneset_Name=names(c()), 
+                            Organism="Homo sapiens", #Check
+                            PMID="",
+                            Description="",
+                            Notes=NA,
+                            Genes=sapply(c(),function(x) paste(x,  collapse = ", ")))
+
+# gene_set_info <- gene_set_info %>%
+#   bind_rows(., immuneSigs.info)
+
+dim(gene_set_info)
+# View(gene_set_info)
+```
+
+```{r}
+input_gs <- c(input_gs, immune_signatures)
+length(input_gs)  # 208
+```
+
+## Lisa Wei 
+
+```{r}
+cell.types.scRNA <- read.csv("Gene_Sets/Wei_scRNAseq_marker_genes_qvals_formatted_celltype.csv",
+                             na.strings = c("","Low quality cell?")) %>% 
+  filter(!is.na(Putative.Cell.Identity)) %>% 
+  mutate_at(vars(Putative.Cell.Identity), ~gsub(" |\\-","_", .))
+
+
+# head(cell.types.scRNA)
+# table(cell.types.scRNA$Putative.Cell.Identity)
+
+
+cell.types.scRNA.gs <- lapply(unique(cell.types.scRNA$Putative.Cell.Identity),
+                              function(x) filter(cell.types.scRNA,Putative.Cell.Identity==x) %>% 
+                                pull(gene))
+names(cell.types.scRNA.gs) <- paste0(unique(cell.types.scRNA$Putative.Cell.Identity),"_scRNAseq_LisaWei")
+
+# head(cell.types.scRNA.gs)
+length(cell.types.scRNA.gs) #9 
+```
+
+```{r}
+cell.types.scRNA.info <- tibble(Geneset_Name=names(cell.types.scRNA.gs), 
+                            Organism="Homo sapiens", #Check
+                            PMID=NA,
+                            Description="Cell types from scRNAseq derived from TARGET AML samples by Lisa Wei",
+                            Notes="scRNAseq",
+                            Genes=sapply(cell.types.scRNA.gs,function(x) paste(x,  collapse = ", ")))
+
+gene_set_info <- gene_set_info %>%
+  bind_rows(., cell.types.scRNA.info)
+
+dim(gene_set_info)
+# View(gene_set_info)
+```
+
+```{r}
+input_gs <- c(input_gs, cell.types.scRNA.info)
+length(input_gs)  #214
+```
+
+
+## Tim Triche
+
+```{r}
+general <- read.csv("Gene_Sets/genelists.csv")
+
+# head(general)
+dim(general) #1221   42
+
+table(general$Cell.Type)
+table(general$Gene.Class)
+```
+
+```{r}
+immune_general <- filter(general, !is.na(Gene.Class), Gene.Class != "HK")  #no house keeping genes needed
+
+immune_general_gs <- lapply(unique(immune_general$Gene.Class), 
+                            function(x) filter(immune_general, Gene.Class==x) %>% 
+                              pull(X.1))
+names(immune_general_gs) <- paste0(gsub("\\s|-","_",unique(immune_general$Gene.Class)),
+                                   "_T.Triche")
+
+length(immune_general_gs) #3 
+```
+
+```{r}
+cell_types <- filter(general, !is.na(Cell.Type)) 
+
+cell_types_gs <- lapply(unique(cell_types$Cell.Type), 
+                        function(x) filter(cell_types, Cell.Type == x ) %>% 
+                          pull(X.1))
+names(cell_types_gs) <- paste0(gsub("\\s|-","_",unique(cell_types$Cell.Type)),
+                                   "_T.Triche")
+length(cell_types_gs) #30
+```
+
+```{r}
+NK_CpGs <- read.csv("Gene_Sets/activated_NK_DNAme_CpGs.csv")
+
+NK_CpGs_gs <- filter(NK_CpGs, gene != "") %>% 
+  pull(gene) %>% 
+  str_split(., ",") %>% 
+  unlist() %>% 
+  unique()
+
+NK_CpGs_gs <- list("activated_NK_DNAme_CpGs_T.Triche"=NK_CpGs_gs)
+
+length(NK_CpGs_gs) #1
+```
+
+```{r}
+cell.type.len <- length(c(immune_general_gs,cell_types_gs))
+
+cell.types.NKs.info <- tibble(Geneset_Name=names(c(immune_general_gs, cell_types_gs,NK_CpGs_gs)), 
+                            Organism=c(rep("Unknown",cell.type.len),"Homo sapiens"), 
+                            PMID=NA,
+                            Description=c(rep("Immune Signatures from Tim Triche", cell.type.len), 
+                                              "NK Signature derived from DNAmethylation array data by Nate Buteyn and Tim Triche."),
+                            Notes=c(rep("Unknown",cell.type.len), "DNAme Array"),
+                            Genes=sapply(c(immune_general_gs,cell_types_gs,NK_CpGs_gs),function(x) paste(x,  collapse = ", ")))
+
+gene_set_info <- gene_set_info %>%
+  bind_rows(., cell.types.NKs.info)
+
+dim(gene_set_info)
+# View(gene_set_info)
+```
+
+```{r}
+input_gs <- c(input_gs, immune_general_gs, cell_types_gs, NK_CpGs_gs)
+length(input_gs) #248
+```
+
+
+## Hamid Bolouri
+
+> Cell Rep. 2017 Jan 3;18(1):248-262. doi: 10.1016/j.celrep.2016.12.019.
+Pan-cancer Immunogenomic Analyses Reveal Genotype-Immunophenotype Relationships and Predictors of Response to Checkpoint Blockade
+Pornpimol Charoentong 1, Francesca Finotello 1, Mihaela Angelova 1, Clemens Mayer 1, Mirjana Efremova 1, Dietmar Rieder 1, Hubert Hackl 1, Zlatko Trajanoski 2
+
+```{r}
+Solid_Cancers <- read.delim(file.path(PROJHOME,"0000.00.01_GSEA_geneSets_gmt/custom/immuneMarkersInSolidCancers_PMID28052254.txt")) 
+
+solid_cancer_cell_types <- lapply(unique(Solid_Cancers$CellType),
+                                  function(x) filter(Solid_Cancers,CellType==x) %>% 
+                                    pull(gene))
+names(solid_cancer_cell_types) <- paste("Solid_Cancer_Cell_Types",
+                                        gsub("\\s","_",unique(Solid_Cancers$CellType)),
+                                        "PMID_28052254",
+                                        sep="_")
+
+# min(table(Solid_Cancers$CellType))
+length(solid_cancer_cell_types) #28
+```
+
+```{r}
+solid_cancer.info <- tibble(Geneset_Name=names(c(solid_cancer_cell_types)), 
+                            Organism="Homo sapiens", 
+                            PMID="28052254",
+                            Description=c("Pan-cancer Immunogenomic Analyses derived from TCGA Studies."),
+                            Notes="bulk RNAseq",
+                            Genes=sapply(c(solid_cancer_cell_types),function(x) paste(x,  collapse = ", ")))
+
+gene_set_info <- gene_set_info %>%
+  bind_rows(., solid_cancer.info)
+
+
+# dim(gene_set_info)
+# View(gene_set_info)
+```
+
+```{r}
+input_gs <- c(input_gs, solid_cancer_cell_types)
+
+length(input_gs) #solid_cancer_cell_types
+```
+
+
+# Save the final Gene Sets
+
+
+```{r eval=FALSE}
+for (i in 1:length(input_gs)){
+  
+  append <- ifelse(i==1,FALSE,TRUE)
+  line <- paste(c(names(input_gs)[i], input_gs[[i]]), 
+                collapse = " ")
+  line <- paste0(line,"\n")
+  
+  cat(line,
+      file = "TCR_BCR_Immune_Signature_Gene_Sets_for_GSVA_11.12.20.gmt",
+      sep = " ",
+      fill = FALSE, 
+      labels = NULL,
+      append = append)
+}
+
+```
+
+
+# GSVA matrix
+
+```{r}
+library(GSVA)
+library(limma)
+library(edgeR)
+```
+
+
+## GRCh38
+
+with Gencode v29 annotations and repbase v24.01 annotations
+
+```{r eval=FALSE}
+samps <- intersect(sample_info$Sample, colnames(kallisto.cts)) #missing stella
+cts_all <- as.data.frame(kallisto.cts[,samps])
+rownames(cts_all) <- kallisto.cts$gene_name
+
+#Filter low count genes
+keep <- rowSums(cpm(cts_all) >= 1) >= 0.025*ncol(cts_all) #50 samples threshold
+cts_all <- cts_all[keep, ]  #
+
+
+#TMM normalization
+dge <- DGEList(counts=cts_all)
+dge <- calcNormFactors(dge,method = "TMMwsp")
+
+
+#Counts per million
+logCPM <- edgeR::cpm(dge,log=TRUE,normalized.lib.sizes=TRUE, prior.count=1)
+
+
+dim(logCPM) #28334  2016
+head(logCPM[1000:1005,1:5])
+
+# saveRDS(cts_all,"TARGET_AML_RBD_Kallisto_Quant_GeneLevel_dupGenesRemoved_filtLowCounts_scaledTPM_counts.RDS")
+# write.csv(cts_all,"TARGET_AML_RBD_Kallisto_Quant_GeneLevel_dupGenesRemoved_filtLowCounts_scaledTPM_counts.csv")
+```
+
+```{r eval=FALSE}
+gsva.res.all <- gsva(expr = logCPM,
+                 gset.idx.list = input_gs, 
+                 method="gsva",
+                 kcdf="Gaussian",
+                 parallel.sz=2, 
+                 mx.diff=TRUE,
+                 abs.ranking=FALSE, 
+                 tau=1,
+                 min.sz=15,
+                 max.sz=600,
+                 verbose=TRUE)
+
+# saveRDS(gsva.res.all,"TARGET_AML_diagnostic_rlps_NBM_kallisto_GRCh38_gsva_scores.RDS")
+# write.csv(gsva.res.all,"TARGET_AML_diagnostic_rlps_NBM_kallisto_GRCh38_gsva_scores.csv")
+
+
+# dim(gsva.res.all) #
+# head(gsva.res.all[,1:5])
+# tail(gsva.res.all[,1:5])
+```
+
+
+## GRCh37
+
+with ensembl v69 annotations
+
+```{r eval=FALSE}
+samps_37 <- intersect(sample_info$Sample, colnames(rbd.cts)) #missing stella
+cts_37 <- as.data.frame(rbd.cts[,samps])
+rownames(cts_37) <- rbd.cts$Gene
+
+#Filter low count genes
+keep <- rowSums(cpm(cts_37) >= 1) >= 0.025*ncol(cts_37) #50 samples threshold
+cts_37 <- cts_37[keep, ] 
+
+#TMM normalization
+dge_37 <- DGEList(counts=cts_37)
+dge_37 <- calcNormFactors(dge_37,method = "TMMwsp")
+#Counts per million
+logCPM_37 <- edgeR::cpm(dge_37,log=TRUE,normalized.lib.sizes=TRUE, prior.count=1)
+
+dim(logCPM_37) #21035  2016
+head(logCPM_37[,1:5])
+
+
+# saveRDS(cts_37, "TARGET_AML_Ribodepleted_RNAseq_GRCh37_geneLevel_dupGenesRemoved_FiltLowCounts_FractionalCounts.RDS")
+# write.csv(cts_37, "TARGET_AML_Ribodepleted_RNAseq_GRCh37_geneLevel_dupGenesRemoved_FiltLowCounts_FractionalCounts.csv")
+```
+
+'package:stats' may not be available when loadi
+
+```{r eval=FALSE}
+gsva.res.GRCh37 <- gsva(expr = logCPM_37,
+                 gset.idx.list = input_gs, 
+                 # annotation=,
+                 method="gsva",
+                 kcdf="Gaussian",
+                 parallel.sz=2, 
+                 mx.diff=TRUE,
+                 abs.ranking=FALSE, 
+                 tau=1,
+                 min.sz=15,
+                 max.sz=600,
+                 verbose=TRUE)
+
+# saveRDS(gsva.res.GRCh37,"TARGET_AML_diagnostic_rlps_NBM_GRCh37_gsva_scores.RDS")
+# write.csv(gsva.res.GRCh37,"TARGET_AML_diagnostic_rlps_NBM_GRCh37_gsva_scores.csv")
+
+
+dim(gsva.res.GRCh37) #1039 2016
+head(gsva.res.GRCh37[,1:5])
+tail(gsva.res.GRCh37[,1:5])
+```
+
+
+# Additional Optional  Gene-Sets
+
+## KEGG
+
+```{r}
+library(gageData)
+library(gage)
+```
+
+
+>GAGE: generally applicable gene set enrichment for pathway analysis
+Weijun Luo 1, Michael S Friedman, Kerby Shedden, Kurt D Hankenson, Peter J Woolf
+PMID: 19473525
+
+
+```{r}
+data(egSymb)
+data(sigmet.idx.hs)
+data(kegg.sets.hs)
+kegg.sigmet <- kegg.sets.hs[sigmet.idx.hs]
+kegg.sigmet.sym <- lapply(kegg.sigmet, gage::eg2sym)
+
+rm(kegg.sigmet)
+# head(kegg.sigmet.sym)
+```
+
+```{r}
+kegg_set_info <- tibble(Geneset_Name=names(kegg.sigmet.sym), 
+                            Organism="Homo sapiens",
+                            PMID="19473525",
+                            Description="KEGG Pathways from Bioconductor Package GAGE data",
+                            Notes="KEGG Anotations",
+                            Genes=sapply(kegg.sigmet.sym,function(x) paste(x,  collapse = ", ")))
+# gene_set_info <- gene_set_info %>% 
+#     bind_rows(.,kegg_set_info )
+
+# gene_set_info
+```
+
+```{r}
+input_gs <- kegg.sigmet.sym
+length(input_gs)
+```
+
+
+## MSigDB ImmuneSigDB
+
+```{r warning=FALSE}
+BCR <- read.gmt("Gene_Sets/MSigDB_BCR_genesets.gmt")
+TCR <- read.gmt("Gene_Sets/MSigDB_TCR_genesets.gmt")
+C7.HomoSapiens <- read.gmt("Gene_Sets/c7.immune.v.7.genesets.gmt")
+C7.HomoSapiens <- C7.HomoSapiens[grep("_TCR_|_BCR_|_TCELL|_BCELL",names(C7.HomoSapiens))]
+
+length(BCR)
+length(TCR)
+length(C7.HomoSapiens)
+```
+
+```{r}
+msigDB.info <- tibble(Geneset_Name=names(c(BCR, TCR,C7.HomoSapiens)), 
+                            Organism="Homo sapiens",
+                            PMID="",
+                            Description="",
+                            Notes=NA,
+                            Genes=sapply(c(BCR, TCR,C7.HomoSapiens),function(x) paste(x,  collapse = ", ")))
+
+# gene_set_info <- gene_set_info %>%  
+#   bind_rows(., msigDB.info)
+
+# gene_set_info
+```
+
+```{r}
+input_gs <- c(input_gs, BCR, TCR,C7.HomoSapiens)
+
+length(input_gs) #904
+```
+
+
+
+
+# Session Information
+
+```{r}
+sessionInfo()
+```
+

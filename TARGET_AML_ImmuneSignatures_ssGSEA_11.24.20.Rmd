@@ -1,0 +1,218 @@
+---
+title: "TCR and BCR Diversity in AML by ssGSEA"
+author: "Jenny Smith"
+date: "11/24/20"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+---
+
+# Set-up 
+
+```{r setup}
+library(knitr)
+knitr::opts_knit$set(root.dir = file.path(PROJHOME,"2020.10.26_GSVA_ImmuneSigs"))
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, 
+                      fig.align='center', fig.width = 10, fig.height = 10)
+
+
+options(stringsAsFactors = FALSE, bitmapType = 'cairo', device='x11')
+grDevices::X11.options(type='cairo')
+
+table = function (..., useNA = 'ifany') base::table(..., useNA = useNA)
+```
+
+Output created: TARGET_AML_ImmuneSignatures_ssGSEA_11.24.20.html
+Warning message:
+In grDevices::png(f) : unable to open connection to X11 display ''
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+
+library(ggplot2)
+library(gridExtra)
+
+library(dplyr)
+library(tidyr)
+library(tibble)
+
+library(DeGSEA)
+getwd()
+```
+
+
+# Define Samples
+
+```{r}
+sample_info <- read.csv("GRCh38_Expression_Data/TARGET_AML_Ribodepleted_RNAseq_GRCh38_Sample_Manifest.csv") 
+
+dim(sample_info) #1383   17
+head(sample_info[,1:5])
+```
+
+
+# TPM Normalized Counts
+
+```{r}
+TPM <- readRDS("GRCh38_Expression_Data/TARGET_AML_dupGenesRemoved_TPM.RDS")
+
+TPM <- TPM[,sample_info$Colnames]
+
+head(TPM[,1:5])
+dim(TPM) #59087  1383
+```
+
+```{r}
+keep <- rowSums(TPM) > 0 #only remove zero count genes
+TPM <- TPM[keep,]
+log2TPM <- log2(TPM+1)
+
+dim(log2TPM) #57058  1383
+head(log2TPM[,1:5])
+```
+
+#Gene Annotations
+
+```{r}
+geneIDmap <- read.csv("GRCh38_Expression_Data/gencode.v31.primary_assembly.geneLevel_IDmap.csv")
+
+dim(geneIDmap)
+```
+
+
+
+# Literature Search Methods
+
+We need to have a definitive list of the Genesets for use in the Immune Signature analysis. So we will begin with the curation and ssGSVA or ssGSEA.
+
+Also, need to determine what the literature states about methods for the ssGSEA or should we use another algorithm? 
+
+* Immune Lanscape of Cancer:
+https://www.sciencedirect.com/science/article/pii/S1074761318301213#sec4
+Gene sets from Bindea et al. (2013), Senbabaoglu et al. (2016), and the MSigDB C7 collection were scored using single-sample gene set enrichment (ssGSEA) analysis (Barbie et al., 2009), as implemented in the GSVA R package (Hänzelmann et al., 2013). All other signatures were scored using methods found in the associated citations
+Immune Signature Cluster Modeling in TCGA:Representative clusters were identified as follows: two independent analysts used weighted gene correlation network analysis (WGCNA) to produce clusters of signatures (Langfelder and Horvath, 2008). First, using gene set scores (ssGSEA) (Barbie et al., 2009) over all samples, Spearman correlations were computed between signatures creating a correlation matrix. Then, the correlation matrix was scaled by taking each element to a specified power and clustered using the WGCNA R package
+
+
+* Single-Cell RNA-Seq Reveals AML Hierarchies Relevant to Disease Progression and Immunity:
+https://www.sciencedirect.com/science/article/pii/S0092867419300947?via%3Dihub#sec4
+We calculated cell cycle-gene expression scores in single cell profiles by using a minimal gene signature of ten genes that are highly expressed in cycling cells (ASPM, CENPE, CENPF, DLGAP5, MKI67, NUSAP1, PCLAF, STMN1, TOP2A, TUBB). For each of these genes, we selected the 100 genes with the smallest difference in average expression level as a background gene set. The average expression of the background gene set was then subtracted from the respective signature gene, and the average of the resulting values of all signature genes was kept as the cell cycle-gene expression score. A similar strategy for scoring gene signatures from single-cell expression data has been described previously (Puram et al., 2017). 
+
+* Genomic Analysis of Immune Cell Infiltrates Across 11 Tumor Types
+https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5241901/
+For each signature, the mean expression of all genes in the signature was used as the signature score for a given tumor/patient.
+
+
+* Molecular and Genetic Properties of Tumors Associated with Local Immune Cytolytic Activity
+https://www.sciencedirect.com/science/article/pii/S0092867414016390?via%3Dihub#sec4
+Cytolytic activity (CYT) was calculated as the geometric mean of GZMA and PRF1 (as expressed in TPM, 0.01 offset). Marker genes for specific cell types were identified as those with expression at least 2-fold greater than observed in any other cell type (using Fantom5 and DMAP), and enrichment was calculated using ssGSEA (Barbie et al., 2009).
+
+
+* Pan-cancer Immunogenomic Analyses Reveal Genotype-Immunophenotype Relationships and Predictors of Response to Checkpoint Blockade
+Identification of TIL Subpopulations, Cancer-Germline Antigens, Neoantigens, Tumor Heterogeneity, and Clonality of Mutations
+Genomic and clinical data for 20 solid tumors were downloaded via the TCGA data portal (Supplemental Experimental Procedures). We used single sample gene set enrichment analysis (ssGSEA) (Barbie et al., 2009) to identify immune cell types that are over-represented in the tumor microenvironment (Supplemental Experimental Procedures).
+For each patient the cytolytic activity was calculated as the mean of the GZMA and PRF1 expression levels [log2 (TPM+1)] as previously defined (Rooney et al., 2015)
+
+# Read in Gene Sets 
+
+```{r}
+gene_set_anno <- read.csv("Gene_Sets/0_Immune_Signatures_GeneSets_Information_v3_ts_edit_20201122.csv")
+
+dim(gene_set_anno)
+```
+
+```{r}
+gene_sets <- read.gmt("Gene_Sets/Updated_TCR_BCR_ImmuneSignatureGeneSets_20201128.gmt")
+
+length(gene_sets)
+quantile(sapply(gene_sets, length))
+# head(gene_sets)
+```
+
+```{r}
+# table(gene_set_anno$Geneset_Name %in% names(gene_sets))
+# gene_set_anno$Geneset_Name[!(gene_set_anno$Geneset_Name %in% names(gene_sets))]
+```
+
+```{r}
+#Check that gene symbols are found in the expression data 
+zero_genes_idx <- sapply(gene_sets, function(x) sum(rownames(log2TPM) %in% x) == 0)
+
+# table(zero_genes_idx) #5 missing any genes in the 
+zero_genes <- gene_sets[zero_genes_idx]
+
+zero_genes #IL3RA is 0 count in the this dataset
+```
+
+
+# GSVA matrix
+
+```{r}
+library(GSVA)
+```
+
+```{r eval=FALSE}
+gsva.res <- gsva(expr = as.matrix(log2TPM),
+                 gset.idx.list = gene_sets, 
+                 method="ssgsea",
+                 kcdf="Gaussian",
+                 parallel.sz=2, 
+                 mx.diff=TRUE,
+                 abs.ranking=FALSE, 
+                 tau=1,
+                 min.sz=0,
+                 max.sz=Inf,
+                 verbose=TRUE)
+
+dim(gsva.res) #290 1383
+head(gsva.res[,1:5])
+tail(gsva.res[,1:5])
+
+# saveRDS(gsva.res,"ssGSEA/TARGET_AML_diagnostic_rlps_NBM_GRCh38_ssGSEA_scores.RDS")
+# write.csv(gsva.res,"ssGSEA/TARGET_AML_diagnostic_rlps_NBM_GRCh38_ssGSEA_scores.csv")
+```
+
+
+# Check on negative controls 
+
+```{r}
+gsva.res <- readRDS("ssGSEA/TARGET_AML_diagnostic_rlps_NBM_GRCh38_ssGSEA_scores.RDS")
+dim(gsva.res)
+```
+
+```{r}
+#Select CD8 cells randomly for now. Simply, there should not be any CD8 cells in the cell line cultures so these would have decrease in enrichment of these gene-sets. 
+grep("CD8 T cells_Bindea_PMID_29628290", rownames(gsva.res), value=T)
+```
+
+```{r}
+df <- gsva.res["CD8 T cells_Bindea_PMID_29628290", ] %>% 
+  as.data.frame()  %>% 
+  rownames_to_column() %>%
+  rename_all(~c("Colnames","Score")) %>% 
+  inner_join(., sample_info, by="Colnames")
+
+head(df)
+table(df$Group)
+dim(df)
+```
+
+```{r fig.height=5, fig.width=7}
+ggplot(df, aes(x=Group, y=Score, fill=Group)) +
+  geom_boxplot() +
+  labs(title="CD8 T cells_Bindea_PMID_29628290") +
+  theme_classic()
+```
+
+
+
+
+# Session Information
+
+```{r}
+sessionInfo()
+```
+

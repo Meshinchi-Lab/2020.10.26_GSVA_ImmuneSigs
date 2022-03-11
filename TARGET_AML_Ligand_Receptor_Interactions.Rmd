@@ -1,0 +1,357 @@
+---
+title: "Receptor Ligand Interactions in AML"
+author: "Jenny Smith"
+date: "November 5, 2018"
+output: html_document
+---
+
+#Set-up
+
+```{r setup}
+library(knitr)
+
+knitr::opts_knit$set(root.dir = file.path(PROJHOME,"2020.10.26_GSVA_ImmuneSigs"))
+
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center', message = FALSE, fig.width = 5, fig.height = 5)
+options(stringsAsFactors = FALSE)
+```
+
+```{r}
+library(ggplot2)
+library(stringr)
+library(magrittr)
+library(dplyr)
+library(tidyr)
+library(tibble)
+# library(XML)
+getwd()
+```
+
+
+#Define Functions to be used
+
+```{r}
+corr.ligand.receptors <- function(gene.Expn, n_perm=1000, method="spearman"){
+ #gene.Expn is a named numeric vector of mRNA log2 normalized expn (CPM, TPM, RPKM, etc)
+  
+
+  #Subset for the group of interest and ensure same order in expression sets
+  GE <- t(gene.Expn)
+  
+  #labels switching
+  set.seed(2020)
+  gene_labels <- lapply(1:n_perm, function(x) sample(colnames(GE),size = ncol(GE), replace = FALSE))
+  
+  
+  
+  #set plan multisession for rstudio
+  options(future.plan="multisession",
+          future.globals.maxSize=+Inf)
+  
+  #use furrr with the base cor function and cor.test
+  pairs <- expand.grid(colnames(GE),colnames(GE)) %>% 
+    mutate_all(as.character)
+  
+  corr <- cor(GE, method=method)
+
+  pair.list <- lapply(1:nrow(pairs), function(i) pairs[i,])
+  p.vals <- furrr::future_map_dfr(pair.list, function(pair){
+
+      # pair <- as.character(pair)
+      gene1 <- as.character(pair[1])
+      gene2 <- as.character(pair[2])
+
+      x <- GE[,gene1]
+      y <- GE[,gene2]
+      
+      c.pval <- suppressWarnings(cor.test(x, y, method = method))
+      
+      df <- pair %>% 
+        mutate(p.value=c.pval$p.value,
+               rho=c.pval$estimate)
+
+  })
+  
+  #correlation of "true" gene-ligand pairs 
+  #this packages takes FOREVER to run (> 1 hr for 7000 genes)
+  # corr <- psych::corr.test(GE[,1:100], method=method,
+  #                   adjust="BH",
+  #                   ci=FALSE)
+  
+  
+  #correlation matrices of the permutate gene labels
+  permutation_corr <- furrr::future_map(gene_labels, function(labs){
+    tmp <- GE
+    colnames(tmp) <- labs 
+    cor.mat <- cor(tmp, method=method)
+  })
+  
+  
+  list <- list(corr, p.vals, permutation_corr)
+  names(list) <- c("correlation_matrix","p_values","permutation_corrs")
+  
+  return(list)
+}
+```
+
+
+
+#Read in the clinical data
+
+```{r}
+CDEs <- read.csv(file.path(CDE, "Merged/TARGET_AML_0531_1031_merged_CDEs_9.18.20.csv"),
+                   na.strings = c("N/A","#N/A","NA","^$", "^\\.$")) 
+
+
+CDEs <- CDEs %>% 
+  filter(!is.na(USI), USI != "Unknown") %>% 
+  filter(Eligibility_Comments != "remove")
+
+# CDEs <- read.csv("TARGET_AML_NUP98.rearranged_Cleaned_CDEs_7.15.2020.csv",
+#                    na.strings = c("N/A","#N/A","NA","^$", "^\\.$"))
+
+dim(CDEs) 
+```
+
+```{r}
+cols.colorbar <- c("Age.Category","Cytogenetic.Category.1","Cytogenetic.Category.2", "SNVs","Rare.Fusions")
+
+
+sample_info <- read.csv("GRCh38_Expression_Data/TARGET_AML_Ribodepleted_RNAseq_GRCh38_Sample_Manifest.csv")  %>%   
+  left_join(., dplyr::select(CDEs,USI,
+                      matches("Age|^OS|^EFS|event|time|mutation|M7_AML"),
+                      Mutations.Category, SNVs,
+                      one_of(cols.colorbar)),
+            by=c("USI"))
+
+
+head(sample_info)
+dim(sample_info) #1385   43
+```
+
+
+#Read in the Gene References
+
+```{r}
+files <- dir(path = "Gene_Sets/LR_pairs/", pattern="^Human")
+
+files
+```
+
+```{r}
+gene_list_dfs <- lapply(files, function(file) 
+  {
+  # print(file)
+  file_path=paste0("Gene_Sets/LR_pairs/",file)
+    if(grepl(".xlsx", file)){
+      df <- xlsx::read.xlsx(file_path, sheetIndex = 1)
+    }else{
+      sep <- ifelse(grepl(".csv",file), ",", "\t")
+      df <- read.delim(file_path,sep=sep)
+    }
+  
+  df <- df %>% 
+    mutate(Source=file)
+  
+  return(df)
+  }
+)
+
+
+length(gene_list_dfs) #10
+names(gene_list_dfs) <- gsub("\\.[a-z]+$", "", gsub("-","_",files))
+
+lapply(gene_list_dfs, dim)
+```
+
+```{r}
+#Pretty Messy
+gene_list_dfs$Human_2020_Noël_LR_pairs <- select(gene_list_dfs$Human_2020_Noël_LR_pairs,
+                                                 Ligand=Ligand.1, Receptor=Receptor.1, Source)  %>% 
+  bind_rows(., select(gene_list_dfs$Human_2020_Noël_LR_pairs,Ligand=Ligand.1, Receptor=Receptor.2,
+                      Source) %>% 
+              filter(!is.na(Receptor))) %>% 
+  bind_rows(., select(gene_list_dfs$Human_2020_Noël_LR_pairs,Ligand=Ligand.2, Receptor=Receptor.1,
+                      Source) %>% 
+              filter(!is.na(Ligand))) %>% 
+  bind_rows(., select(gene_list_dfs$Human_2020_Noël_LR_pairs,Ligand=Ligand.2, Receptor=Receptor.2,
+                      Source)  %>% 
+              filter(!is.na(Ligand), !is.na(Receptor)))
+
+head(gene_list_dfs$Human_2020_Noël_LR_pairs)
+dim(gene_list_dfs$Human_2020_Noël_LR_pairs) #561
+```
+
+```{r}
+#Pretty Messy
+
+Human_2020_Jin_LR_pairs.fmt <- gene_list_dfs$Human_2020_Jin_LR_pairs %>% 
+  separate(receptor,into=c(paste0("receptor.",1:3)),remove = F) %>% 
+  mutate_at(vars(receptor.2), ~case_when(
+    grepl("TGFbR1_R2",receptor) ~ "TGFbR2",
+    TRUE ~ .)) 
+
+
+gene_list_dfs$Human_2020_Jin_LR_pairs <-  select(Human_2020_Jin_LR_pairs.fmt,
+                                                 ligand=ligand,receptor=receptor.1,
+                                                 Source) %>% 
+  bind_rows(., select(Human_2020_Jin_LR_pairs.fmt, ligand=ligand,receptor=receptor.2,
+                      Source)  %>% 
+                   filter(!is.na(receptor))) %>% 
+  bind_rows(., select(Human_2020_Jin_LR_pairs.fmt, ligand=ligand,receptor=receptor.3,
+                      Source)  %>% 
+                    filter(!is.na(receptor)))
+
+
+ head(gene_list_dfs$Human_2020_Jin_LR_pairs)
+dim(gene_list_dfs$Human_2020_Jin_LR_pairs) # 2989    2
+```
+
+```{r}
+#Very Messy 
+
+# gene_list_dfs$Human_2010_Kirouac_LR_pairs %>% 
+#   mutate(LIGAND_Symbol=case_when(
+#     grepl("^[a-z].+ |^Beta|^Bone|^Delta|^End|^Des|^Ind|^Ins|^Jag|^KIT|^Lip|^Notch", LIGAND) ~ gsub("^.+ .([A-Z].+).$", "\\1", LIGAND), 
+#     grepl("^CCL[0-9]|^CX", LIGAND) ~ gsub("^(CCL[0-9]+|CX[0-9A-Z]+) .+", "\\1", LIGAND),
+#     TRUE ~ "THIS"
+#   )) %>% 
+#   select(LIGAND_Symbol, everything())
+# 
+# 
+
+```
+
+```{r}
+dfs_fmt <- purrr::map_dfr(2:10, function(i){
+  gene_list_dfs[[i]] %>% 
+    select(Ligand=matches("ligand.+Sym|^from$|^ligand$"),
+           Receptor=matches("receptor.+Sym|^to$|^receptor$"),
+           Source) %>% 
+    mutate_all(as.character) %>% 
+    mutate_at(vars(Ligand:Receptor), toupper)
+}) %>% 
+  distinct()
+
+head(dfs_fmt)
+# tail(dfs_fmt)
+dim(dfs_fmt) # 38807     3
+
+
+# any(is.na(dfs_fmt$Source))
+```
+
+
+#Read in the Counts
+
+```{r}
+# cts <- readRDS(file.path())
+```
+
+```{r}
+TPM <- readRDS("GRCh38_Expression_Data/TARGET_AML_dupGenesRemoved_TPM.RDS")
+
+
+head(TPM[,1:5])
+dim(TPM) #59087  1385
+```
+
+```{r}
+table(dfs_fmt$Ligand %in% rownames(TPM))
+table(dfs_fmt$Receptor %in% rownames(TPM))
+```
+
+
+#Correlation of the Ligand-Receptor Genes
+
+```{r}
+keep <- rowSums(TPM) > 0 #only remove zero count genes
+TPM <- TPM[keep,]
+log2TPM <- log2(TPM+1)
+
+dim(log2TPM) #57058  1385
+head(log2TPM[,1:5])
+```
+
+```{r}
+dfs_fmt.subset <- dfs_fmt %>% 
+  filter(Ligand %in% rownames(log2TPM), 
+         Receptor %in% rownames(log2TPM)) %>% 
+  
+  group_by(Ligand,Receptor) %>% 
+  mutate_at(vars(Source), ~paste0(., collapse = "; ")) %>% 
+  ungroup() %>% 
+  
+  distinct()
+
+
+dim(dfs_fmt.subset) #26,564     3
+head(dfs_fmt.subset)
+```
+
+```{r}
+in_pairs <- unique(unlist(select(dfs_fmt.subset, Ligand,Receptors)))
+
+
+head(in_pairs)
+tail(in_pairs)
+length(in_pairs) #9041
+```
+
+```{r}
+corrs <- corr.ligand.receptors(gene.Expn = log2TPM[in_pairs,],
+                               n_perm=15,
+                               method = "spearman")
+
+length(corrs)
+
+
+# saveRDS(corrs,"TARGET_AML_Ligand_Receptor_Corrs.RDS")
+```
+
+
+```{r}
+length(corrs$permutation_corrs)
+dim(corrs$permutation_corrs[[1]])
+
+random.corrs <- unlist(corrs$permutation_corrs)
+# class(random.corrs)
+str(random.corrs)
+```
+
+```{r}
+hist(random.corrs,breaks = seq(-1,1,by=0.1))
+abline(v=corrs$p_values %>% 
+  filter(Var1=="BMPR2", Var2=="BMP2") %>% 		
+    pull(rho))
+```
+
+
+
+#Session Info
+
+```{r}
+sessionInfo()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

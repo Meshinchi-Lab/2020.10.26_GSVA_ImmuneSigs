@@ -1,0 +1,471 @@
+---
+title: "TCR and BCR Diversity in AML by ssGSEA"
+author: "Jenny Smith"
+date: "10/26/20"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+---
+
+# Set-up 
+
+```{r setup}
+library(knitr)
+knitr::opts_knit$set(root.dir = file.path(PROJHOME,"2020.10.26_GSVA_ImmuneSigs"))
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, 
+                      fig.align='center', fig.width = 10, fig.height = 10)
+
+
+options(stringsAsFactors = FALSE,bitmapType = 'cairo', device='x11')
+grDevices::X11.options(type='cairo')
+table = function (..., useNA = 'ifany') base::table(..., useNA = useNA)
+```
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+
+library(ggplot2)
+library(gridExtra)
+
+library(dplyr)
+library(tidyr)
+library(tibble)
+
+library(DeGSEA)
+getwd()
+```
+
+#Define Functions
+
+```{r}
+getIDmap <- function(GTF,type="transcript"){
+  #GTF is a dataframe from read.delim(gtf_file)
+  #type is either transcript or gene
+  library(dplyr)
+  library(tibble)
+  options(stringsAsFactors = FALSE)
+  
+  #standard ensembl GTF format and gencode GTF.
+  df <- GTF %>%
+    filter(grepl(type, V3)) %>% 
+    dplyr::pull(V9) %>% #use pull() to create vector from a single column 
+    str_split(., pattern = "; ") %>% 
+    lapply(., function(x) t(str_split(x, pattern = " ", simplify = TRUE))) %>% 
+    sapply(.,  function(x) set_colnames(x, value = x[1,])[-1,]) %>% #bapply ?
+    sapply(., function(x) data.frame(as.list(x))) %>% 
+    bind_rows(.) %>% 
+    mutate(across(everything(), ~gsub("\"","",.x)))
+  
+  return(df)
+}
+```
+
+# ClinData
+
+```{r}
+inelig.Nov2020 <- read.csv(file.path(CDE,"Merged/Ineligables_COG_2020.11.24.csv")) %>% 
+  mutate_at(vars(Not_in), ~case_when(
+    reason == "AAML1031 Arm D" ~ NA_integer_, #ArmD inelig only for outcome 
+    TRUE ~ .)) %>% 
+  filter(!is.na(Not_in))
+
+inelig.Nov2020
+```
+
+```{r}
+merged <- read.csv(file.path(CDE,"Merged/TARGET_AML_0531_1031_merged_CDEs_9.18.20.csv"))
+
+ineligables <- merged %>% 
+  mutate_at(vars(Eligibility_Comments), 
+            ~case_when(Reg. %in% c(773920,775026, 786948,799528) ~ "remove",
+                       Reg. %in% inelig.Nov2020$Reg_NO ~ "remove",
+                       TRUE ~ .)) %>% 
+  filter(Eligibility_Comments == "remove")  
+
+
+
+merged <- merged %>%
+  filter(!is.na(USI), USI != "Unknown") %>%
+  filter(!USI %in% ineligables)
+
+
+dim(merged) #2314  140
+table(ineligables$Protocol)
+```
+
+
+#Gene Annotations
+
+```{r}
+geneIDmap <- read.csv("GRCh38_Expression_Data/gencode.v31.primary_assembly.geneLevel_IDmap.csv")
+
+dim(geneIDmap)
+```
+
+```{r eval=FALSE}
+#rtracklayer::readGFF failed. 
+#reading GFF file: line 2882609 has more than 9 tab-separated columns
+gtf <- read.delim("GRCh38_Expression_Data/gencode.v31.primary_assembly.annotation.gtf",
+                  header=FALSE,comment = "#",quote = "", sep="\t")
+# 
+# head(gtf)
+# dim(gtf) #2,883,431       9
+
+geneIDmap <- getIDmap(GTF=gtf,type="gene") 
+
+# head(geneIDmap)
+# dim(geneIDmap) #60,662     9
+# write.csv(geneIDmap, "gencode.v31.primary_assembly.geneLevel_IDmap.csv", row.names = FALSE)
+```
+
+
+
+# TPM Normalized Counts
+
+```{r}
+TPM <- readRDS("GRCh38_Expression_Data/TARGET_AML_dupGenesRemoved_TPM.RDS")
+
+head(TPM[,1:5])
+dim(TPM) #59087  1385
+```
+
+```{r}
+# keep <- rowSums(TPM >= 1.0) > 0.025*ncol(TPM)
+keep <- rowSums(TPM) > 0 #only remove zero count genes
+TPM <- TPM[keep,]
+log2TPM <- log2(TPM+1)
+
+dim(log2TPM) #57058  1385
+head(log2TPM[,1:5])
+```
+
+
+
+```{r eval=FALSE}
+TPM <- readr::read_tsv("GRCh38_Expression_Data/TARGET_AML_TPM.txt") %>% 
+    left_join(., select(geneIDmap,gene_id,gene_name), 
+            by=c("names"="gene_id"))  %>% 
+    select(names, gene_name,everything())
+
+
+colnames(TPM) <- gsub(".STAR", "",colnames(TPM))
+colnames(TPM) <- case_when(
+                    duplicated(colnames(TPM)) ~ paste0(colnames(TPM), "_replicate"), 
+                    TRUE ~ colnames(TPM))
+
+head(TPM[,1:5])
+dim(TPM) #60,662  1386
+
+# table(is.na(TPM$gene_name)) #OK no NAs
+# any(duplicated(colnames(TPM))) #OK
+# any(is.na(colnames(TPM))) #OK
+# table(duplicated(TPM$gene_name) | duplicated(TPM$gene_name, fromLast=T)) #1768 are duplicated
+
+TPM.unique <- TPM %>% 
+  dplyr::filter(!(duplicated(gene_name) | duplicated(gene_name, fromLast = T)))
+
+# dim(TPM.unique) #58894  1387
+
+TPM.rmDups <- TPM %>% 
+  filter(duplicated(gene_name) | duplicated(gene_name, fromLast = T)) %>% 
+  arrange(gene_name) %>% 
+  
+  rowwise() %>% 
+  mutate(IQR=IQR(c_across(PAVPLI.09A.01R:PAVWNG.40A.01R_RBS))) %>% 
+  ungroup() %>% 
+
+  
+  group_by(gene_name) %>%
+  mutate(Rank=rank(IQR,ties.method= "first")) %>%
+  mutate(Keep=ifelse(Rank==max(Rank), TRUE, FALSE)) %>% 
+  ungroup() %>% 
+  select(IQR:Keep, everything()) 
+  
+# write.csv(select(TPM.rmDups,IQR:gene_name),"GRCh38_Expression_Data/TARGET_AML_DupGenes_Removed_Log.csv", row.names = F)
+
+TPM.rmDups <- TPM.rmDups %>% 
+  filter(Keep) %>% 
+  select(-IQR,-Keep, -Rank) %>% 
+  bind_rows(., TPM.unique) %>% 
+  select(-names) %>% 
+  column_to_rownames("gene_name")
+
+
+# head(TPM.rmDups[,1:5])
+# tail(TPM.rmDups[,1:5])
+# dim(TPM.rmDups) #59087  1385
+
+# write.csv(TPM.rmDups,"GRCh38_Expression_Data/TARGET_AML_dupGenesRemoved_TPM.csv")
+# saveRDS(TPM.rmDups,"GRCh38_Expression_Data/TARGET_AML_dupGenesRemoved_TPM.RDS")
+
+par.genes <- filter(geneIDmap) %>% 
+  group_by(gene_name) %>% 
+  filter(any(grepl("_PAR_Y", gene_id))) %>% 
+  filter(gene_type=="protein_coding") %>% 
+  arrange(gene_name)
+
+# par.genes
+
+par.gene.expn <- TPM %>% 
+  filter(gene_name %in% par.genes$gene_name) %>% 
+  gather(Sample,TPM, -c(names:gene_name)) %>% 
+  arrange(gene_name)
+
+# par.gene.expn
+# quantile(par.gene.expn$TPM) #mostly zero 
+
+rm(TPM.rmDups,TPM.unique, TPM, par.gene.expn, par.genes)
+```
+
+
+
+# Define Samples
+
+```{r}
+sample_info <- read.csv(file.path(TARGET, "SequencingDataMatrix/TARGET_AML_Ribodepleted_Manifest_10.08.20.csv")) %>% 
+  filter(grepl("diagnostic|relapse|NBM|Cell", Time_point),
+         grepl("AML|NBM|Cell", Group)) %>%
+  mutate_at(vars(Tissue:Primary.CNV), ~ifelse(is.na(.), Group, .)) %>% 
+  mutate(Barcode=gsub("TARGET.[0-9][0-9].", "", Sample))
+
+head(sample_info)
+dim(sample_info) #2014   16
+```
+
+```{r}
+sample_info.update <- data.frame(Colnames=colnames(TPM)) %>% 
+  mutate(Barcode=gsub("_.+$", "", Colnames)) %>% 
+  mutate(Barcode=case_when(
+    ! Barcode %in% sample_info$Barcode & grepl("^BM|^R[0O]", Barcode) ~ gsub("09A","14A", Barcode),
+    TRUE ~ Barcode )) %>% 
+  left_join(., sample_info, by="Barcode") %>% 
+  mutate(Eligable=ifelse(!USI %in% ineligables$USI, TRUE, FALSE)) %>% 
+  select(Colnames,Eligable,everything(), -Barcode)
+
+
+head(sample_info.update)
+dim(sample_info.update) #1385   17
+
+any(duplicated(sample_info.update$Colnames)) #OK no dups
+table(sample_info.update$Eligable) #one sample is inelgable
+
+
+# write.csv(sample_info.update, "GRCh38_Expression_Data/TARGET_AML_Ribodepleted_RNAseq_GRCh38_Sample_Manifest.csv",
+#           row.names = FALSE)
+```
+
+```{r}
+table(sample_info.update$AML_Subtype, useNA='always') 
+table(sample_info.update$Batch, useNA='always') 
+table(sample_info.update$Tissue, useNA='always') 
+```
+
+
+
+
+# Literature Search Methods
+
+We need to have a definitive list of the Genesets for use in the Immune Signature analysis. So we will begin with the curation and ssGSVA or ssGSEA.
+
+Also, need to determine what the literature states about methods for the ssGSEA or should we use another algorithm? 
+
+* Immune Lanscape of Cancer:
+https://www.sciencedirect.com/science/article/pii/S1074761318301213#sec4
+Gene sets from Bindea et al. (2013), Senbabaoglu et al. (2016), and the MSigDB C7 collection were scored using single-sample gene set enrichment (ssGSEA) analysis (Barbie et al., 2009), as implemented in the GSVA R package (Hänzelmann et al., 2013). All other signatures were scored using methods found in the associated citations
+Immune Signature Cluster Modeling in TCGA:Representative clusters were identified as follows: two independent analysts used weighted gene correlation network analysis (WGCNA) to produce clusters of signatures (Langfelder and Horvath, 2008). First, using gene set scores (ssGSEA) (Barbie et al., 2009) over all samples, Spearman correlations were computed between signatures creating a correlation matrix. Then, the correlation matrix was scaled by taking each element to a specified power and clustered using the WGCNA R package
+
+
+* Single-Cell RNA-Seq Reveals AML Hierarchies Relevant to Disease Progression and Immunity:
+https://www.sciencedirect.com/science/article/pii/S0092867419300947?via%3Dihub#sec4
+We calculated cell cycle-gene expression scores in single cell profiles by using a minimal gene signature of ten genes that are highly expressed in cycling cells (ASPM, CENPE, CENPF, DLGAP5, MKI67, NUSAP1, PCLAF, STMN1, TOP2A, TUBB). For each of these genes, we selected the 100 genes with the smallest difference in average expression level as a background gene set. The average expression of the background gene set was then subtracted from the respective signature gene, and the average of the resulting values of all signature genes was kept as the cell cycle-gene expression score. A similar strategy for scoring gene signatures from single-cell expression data has been described previously (Puram et al., 2017). 
+
+* Genomic Analysis of Immune Cell Infiltrates Across 11 Tumor Types
+https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5241901/
+For each signature, the mean expression of all genes in the signature was used as the signature score for a given tumor/patient.
+
+
+* Molecular and Genetic Properties of Tumors Associated with Local Immune Cytolytic Activity
+https://www.sciencedirect.com/science/article/pii/S0092867414016390?via%3Dihub#sec4
+Cytolytic activity (CYT) was calculated as the geometric mean of GZMA and PRF1 (as expressed in TPM, 0.01 offset). Marker genes for specific cell types were identified as those with expression at least 2-fold greater than observed in any other cell type (using Fantom5 and DMAP), and enrichment was calculated using ssGSEA (Barbie et al., 2009).
+
+
+* Pan-cancer Immunogenomic Analyses Reveal Genotype-Immunophenotype Relationships and Predictors of Response to Checkpoint Blockade
+Identification of TIL Subpopulations, Cancer-Germline Antigens, Neoantigens, Tumor Heterogeneity, and Clonality of Mutations
+Genomic and clinical data for 20 solid tumors were downloaded via the TCGA data portal (Supplemental Experimental Procedures). We used single sample gene set enrichment analysis (ssGSEA) (Barbie et al., 2009) to identify immune cell types that are over-represented in the tumor microenvironment (Supplemental Experimental Procedures).
+For each patient the cytolytic activity was calculated as the mean of the GZMA and PRF1 expression levels [log2 (TPM+1)] as previously defined (Rooney et al., 2015)
+
+# Read in Gene Sets 
+
+```{r}
+gene_set_anno <- read.csv("Gene_Sets/0_Immune_Signatures_GeneSets_Information_v3_ts_edit_20201122.csv")
+
+dim(gene_set_anno)
+```
+
+```{r}
+gene_sets <- read.gmt("Gene_Sets/Updated_TCR_BCR_ImmuneSignatureGeneSets_20201122.gmt")
+gene_sets <- lapply(gene_sets, function(x) gsub(" ", "", x))
+
+length(gene_sets)
+quantile(sapply(gene_sets, length))
+head(gene_sets)
+```
+
+```{r}
+table(gene_set_anno$Geneset_Name %in% names(gene_sets))
+gene_set_anno$Geneset_Name[!(gene_set_anno$Geneset_Name %in% names(gene_sets))]
+```
+
+```{r}
+zero_genes_idx <- sapply(gene_sets, function(x) sum(rownames(log2TPM) %in% x) == 0)
+
+# table(zero_genes_idx) #5 missing any genes in the 
+zero_genes <- gene_sets[zero_genes_idx]
+
+zero_genes #IL3RA is 0 count in the this dataset
+#The others need to be filled in...
+```
+
+
+1. NOTE: GP2_ImmuneTcellBcell_score_Wolf_PMID_29628290 on REACTOME_SIGNALING_IN_IMMUNE_SYSTEM from MSigDB is deprecated
+https://software.broadinstitute.org/cancer/software/gsea/wiki/index.php/Mapping_between_v3.1_and_v3.0_gene_sets
+http://www1.lf1.cuni.cz/~vkulv/gsea/gsea_msigdb3/REACTOME_SIGNALING_IN_IMMUNE_SYSTEM.html
+KEGG_HEMATOPOEITIC_CELL_LINEAGE from MSigDB
+
+
+```{r}
+reactome.immune <- read.csv("Gene_Sets/REACTOME_SIGNALING_IN_IMMUNE_SYSTEM.csv") %>% 
+  filter(Gene != "")
+
+dim(reactome.immune) #322
+
+kegg.hema <- read.gmt("Gene_Sets/KEGG_HEMATOPOEITIC_CELL_LINEAGE.gmt")
+length(kegg.hema$KEGG_HEMATOPOIETIC_CELL_LINEAGE) #87
+```
+
+```{r}
+gene_sets$GP2_ImmuneTcellBcell_score_Wolf_PMID_29628290 <- unique(c(reactome.immune$Gene, kegg.hema$KEGG_HEMATOPOIETIC_CELL_LINEAGE))
+
+length(gene_sets$GP2_ImmuneTcellBcell_score_Wolf_PMID_29628290) #391
+```
+
+2. NOTE: GP11_Immune_IFN_Wolf_PMID_29628290
+Minterferon_Cluster_21214954 found in the supplement of https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3025826/
+ZHANG_INTERFERON_RESPONSE from MSigDB
+
+```{r}
+zhang <- read.gmt("Gene_Sets/ZHANG_INTERFERON_RESPONSE.gmt")
+head(zhang)
+length(zhang$ZHANG_INTERFERON_RESPONSE)
+```
+
+```{r}
+biomart.res <- read.csv("Gene_Sets/MInterferon_Cluster_PMID_21214954_Symbols.csv")
+mintferon <- read.csv("Gene_Sets/MInterferon_Cluster_PMID_21214954.csv") %>% 
+  left_join(., biomart.res, by=c("MInterferon_Cluster"="NCBI.gene..formerly.Entrezgene..ID")) %>% 
+  arrange(Gene.name) %>% 
+  filter(!duplicated(MInterferon_Cluster))
+
+
+dim(mintferon) #48  4
+# biomart.res
+
+# table(is.na(mintferon$Gene.name))
+# table(duplicated(mintferon$MInterferon_Cluster)) #17 dulplicates, where entrez IDs map to multiple Ensembl IDs but all the same gene name
+# mintferon %>% 
+#   filter(duplicated(MInterferon_Cluster) | duplicated(MInterferon_Cluster, fromLast = T))
+```
+
+```{r}
+gene_sets$GP11_Immune_IFN_Wolf_PMID_29628290 <- unique(c(mintferon$Gene.name,zhang$ZHANG_INTERFERON_RESPONSE))
+# length(gene_sets$GP11_Immune_IFN_Wolf_PMID_29628290) #62
+```
+
+3. NOTE: CD103pos_CD103neg_ratio_25446897_Wolf_PMID_29628290
+https://www.sciencedirect.com/science/article/pii/S1535610814003705?via%3Dihub
+The CD103+/CD103− ratio signature is calculated as the log of the mean expression of CD103+ DC genes divided by the mean expression of the CD103− DC genes, followed by Z score standardization (mean = 0, SD = 1; gene list in Figure 8C). 
+
+```{r}
+CD103 <- read.csv("Gene_Sets/CD103pos_CD103neg_ratio_25446897_Wolf_PMID_29628290.csv") %>% 
+  filter(Gene.Signat. != "", ! grepl("CD103.+s", Gene.Signat.)) %>% 
+  mutate_at(vars(Gene.Signat.), ~gsub(" ", "", .))
+
+head(CD103)
+dim(CD103) #26
+# table(duplicated(CD103$Gene.Signat.))
+```
+
+```{r}
+gene_sets$CD103pos_CD103neg_ratio_25446897_Wolf_PMID_29628290 <- CD103$Gene.Signat.
+```
+
+```{r}
+#A second check!
+zero_genes_idx <- sapply(gene_sets, function(x) sum(rownames(log2TPM) %in% x) == 0)
+
+# table(zero_genes_idx) #5 missing any genes in the 
+zero_genes <- gene_sets[zero_genes_idx]
+
+zero_genes #IL3RA is 0 count in the this dataset
+#The others need to be filled in...
+```
+
+
+#Save the updated gene-sets 
+
+```{r}
+gene_sets_orig <- gene_sets
+```
+
+```{r eval=FALSE}
+for (i in 1:length(gene_sets)){
+  
+  append <- ifelse(i==1,FALSE,TRUE)
+  
+  #temporary due to the gmt fileformat requiring a "description feild" 
+  #I will merge in the csv annotations
+  gene_sets[[i]] <- c(NA,gene_sets[[i]])
+
+  
+  line <- paste0(c(names(gene_sets)[i], gene_sets[[i]]), 
+                collapse = "\t")
+  line <- paste0(line,"\n")
+  
+  cat(line,
+      file = "Gene_Sets/Updated_TCR_BCR_ImmuneSignatureGeneSets_20201128.gmt",
+      sep = " ",
+      fill = FALSE, 
+      labels = NULL,
+      append = append)
+}
+
+```
+
+```{r}
+idx <- which(sapply(gene_sets_orig, length)==1)
+
+gene_sets_orig[idx]
+```
+
+```{r}
+test <- read.gmt("Gene_Sets/Updated_TCR_BCR_ImmuneSignatureGeneSets_20201128.gmt")
+
+# length(test)
+head(test)
+# test$CD103pos_CD103neg_ratio_25446897_Wolf_PMID_29628290
+```
+
+
+
+
+
+# Session Information
+
+```{r}
+sessionInfo()
+```
+
